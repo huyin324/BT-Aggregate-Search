@@ -37,7 +37,7 @@
 ## 三、使用方法
 
 ### 1. 直接运行 exe（推荐）
-从 [Releases](https://github.com/huyin324/BT-Aggregate-Search/releases) 下载 `BT磁力聚合搜索工具.exe`，双击即可运行，无需安装 Python。
+从 [Releases](https://github.com/huyin324/BT-Aggregate-Search/releases) 下载 `BT-Aggregate-Search-V1.0.exe`（即打包好的 `BT磁力聚合搜索工具.exe`），双击即可运行，无需安装 Python。
 
 ### 2. 源码运行
 ```bash
