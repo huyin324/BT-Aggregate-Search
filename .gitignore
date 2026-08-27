@@ -1,0 +1,27 @@
+# 构建产物
+build/
+dist/
+__pycache__/
+*.pyc
+*.spec
+
+# 环境与缓存
+venv/
+.env
+.workbuddy/
+
+# 探测/调试临时文件
+probe_out/
+probe_*.py
+debug_*.py
+check_*.py
+download_gcc*.py
+analyze_u001.py
+deep_analyze.py
+diagnose_sites.py
+nuitka-crash-report.xml
+
+# OS
+Thumbs.db
+ehthumbs.db
+Desktop.ini
