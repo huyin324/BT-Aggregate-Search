@@ -3,7 +3,7 @@
 BT磁力聚合搜索工具 - PyQt6版
 支持多站点聚合搜索，新增：网络代理智能回退、每页条目数与原站一致、
 结果排序（大小/时间/热度）、工具图标、界面/性能/反爬优化。
-版本：V2.0
+版本：V2.1
 仅用于技术学习，请遵守版权法律法规
 """
 
@@ -16,6 +16,8 @@ import warnings
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from urllib.parse import quote
+from concurrent.futures import ThreadPoolExecutor
 from bs4 import BeautifulSoup
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
                              QLineEdit, QPushButton, QListWidget, QListWidgetItem,
@@ -95,7 +97,10 @@ def build_headers(extra=None):
         "User-Agent": ua,
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
+        # 关键：不要声明 br(brotli)。一旦服务器返回 Content-Encoding: br 而环境未装
+        # brotli，requests 无法解码，resp.text 变成二进制乱码，导致解析器一条都抓不到。
+        # 只声明 gzip/deflate，requests/urllib3 原生即可解码。
+        "Accept-Encoding": "gzip, deflate",
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
         "Sec-Ch-Ua": '"Google Chrome";v="125", "Chromium";v="125", "Not.A/Brand";v="24"',
@@ -283,9 +288,13 @@ SITE_LIST = [
         "detail_url": "", "encoding": "utf-8", "status": "normal", "parser": "generic", "page_size": 0,
     },
     {
+        # 前端是 iframe 代理壳，真实后端由页面内 atob() 解码得到：cdn.cilimao.fun:39520
+        # 该后端与磁力狗同模板，关键词参数必须是 word（用 q 会返回空结果）
         "id": "cilimao", "name": "磁力猫 (cilimao.de)", "base_url": "https://cilimao.de",
-        "search_url": "https://cilimao.de/search?q={kw}",
-        "detail_url": "", "encoding": "utf-8", "status": "normal", "parser": "generic", "page_size": 0,
+        "search_url": "https://cdn.cilimao.fun:39520/search?word={kw}&host=cilimao.de",
+        "detail_url": "https://cdn.cilimao.fun:39520/information/{hash}",
+        "encoding": "utf-8", "status": "normal", "parser": "ciligou", "page_size": 15,
+        "extra_headers": {"Referer": "https://cilimao.de/"},
     },
     {
         "id": "btlms", "name": "北辰阁 (tr.btlms.top)", "base_url": "https://tr.btlms.top",
@@ -295,27 +304,40 @@ SITE_LIST = [
     {
         "id": "zzb10", "name": "种子吧 (zzb10.vip)", "base_url": "https://zzb10.vip",
         "search_url": "https://zzb10.vip/", "method": "post", "post_data": {"wd": "{kw}"},
-        "detail_url": "", "encoding": "utf-8", "status": "normal", "parser": "generic", "page_size": 0,
+        "detail_url": "https://zzb10.vip/seed/{hash}",
+        "encoding": "utf-8", "status": "normal", "parser": "zzb10", "page_size": 15,
+        "resolve_detail": True, "detail_limit": 15,
     },
     {
+        # iframe 代理后端 doc2.htmcdn.com:39988，与 dobt 同后端同模板
         "id": "cilido", "name": "磁力多 (zh.cilido.top)", "base_url": "https://zh.cilido.top",
-        "search_url": "https://zh.cilido.top/search?q={kw}",
-        "detail_url": "", "encoding": "utf-8", "status": "normal", "parser": "generic", "page_size": 0,
+        "search_url": "https://doc2.htmcdn.com:39988/search?word={kw}&host=zh.cilido.top&v=1",
+        "detail_url": "https://doc2.htmcdn.com:39988/doc/{hash}",
+        "encoding": "utf-8", "status": "normal", "parser": "dobt", "page_size": 15,
+        "extra_headers": {"Referer": "https://zh.cilido.top/"},
     },
     {
-        "id": "ttcl", "name": "天堂磁力 (tt6.ttcl.cc)", "base_url": "https://tt6.ttcl.cc",
-        "search_url": "https://tt6.ttcl.cc/search?q={kw}",
-        "detail_url": "", "encoding": "utf-8", "status": "normal", "parser": "generic", "page_size": 0,
+        # iframe 代理后端 tt.ttso.top
+        "id": "ttcl", "name": "天堂磁力 (tt6.ttcl.cc)", "base_url": "https://tt.ttso.top",
+        "search_url": "https://tt.ttso.top/search?word={kw}",
+        "detail_url": "https://tt.ttso.top/bt/{hash}",
+        "encoding": "utf-8", "status": "normal", "parser": "ttcl", "page_size": 20,
+        "extra_headers": {"Referer": "https://tt6.ttcl.cc/"},
     },
     {
-        "id": "sofan1", "name": "沙发影视 (ma.sofan1.cc)", "base_url": "https://ma.sofan1.cc",
-        "search_url": "https://ma.sofan1.cc/search?q={kw}",
-        "detail_url": "", "encoding": "utf-8", "status": "normal", "parser": "generic", "page_size": 0,
+        # iframe 代理后端 cdn.sofan.one:65533
+        "id": "sofan1", "name": "搜番 (ma.sofan1.cc)", "base_url": "https://ma.sofan1.cc",
+        "search_url": "https://cdn.sofan.one:65533/search?word={kw}&host=ma.sofan1.cc",
+        "detail_url": "", "encoding": "utf-8", "status": "normal", "parser": "generic", "page_size": 15,
+        "extra_headers": {"Referer": "https://ma.sofan1.cc/"},
     },
     {
-        "id": "foxr", "name": "磁力狐 (t8.foxr.top)", "base_url": "https://t8.foxr.top",
-        "search_url": "https://t8.foxr.top/search?q={kw}",
-        "detail_url": "", "encoding": "utf-8", "status": "normal", "parser": "generic", "page_size": 0,
+        # iframe 代理后端 cache.foxn.top（磁力藏在 /doc/{hash} 中）
+        "id": "foxr", "name": "磁力狐 (t8.foxr.top)", "base_url": "https://cache.foxn.top",
+        "search_url": "https://cache.foxn.top/search?word={kw}",
+        "detail_url": "https://cache.foxn.top/doc/{hash}",
+        "encoding": "utf-8", "status": "normal", "parser": "foxr", "page_size": 15,
+        "extra_headers": {"Referer": "https://t8.foxr.top/"},
     },
     {
         "id": "taocili", "name": "淘磁力 (taocili.com)", "base_url": "https://taocili.com",
@@ -340,7 +362,9 @@ SITE_LIST = [
     {
         "id": "cilisousuo_cc", "name": "磁力搜索CC (cilisousuo.cc)", "base_url": "https://cilisousuo.cc",
         "search_url": "https://cilisousuo.cc/search?q={kw}",
-        "detail_url": "", "encoding": "utf-8", "status": "normal", "parser": "generic", "page_size": 0,
+        "detail_url": "https://cilisousuo.cc/magnet/{hash}",
+        "encoding": "utf-8", "status": "normal", "parser": "cilisousuo_cc", "page_size": 100,
+        "resolve_detail": True, "detail_limit": 24,
     },
     {
         "id": "btsearch_love", "name": "BTSearch (btsearch.love)", "base_url": "https://www.btsearch.love",
@@ -360,6 +384,36 @@ SITE_LIST = [
 ]
 
 
+# ===================== 已失效站点登记表 =====================
+# BT 站多为一次性轮换域名，实测（2026-09）以下站点已确认不可用：
+# 域名过期返回 410、站点维护返回 503、或搜索接口直接 404。
+# 这里集中登记并默认停用，避免每次搜索都空跑十几个必然失败的请求。
+# 若日后域名恢复可用，把对应条目从本表删除即可自动重新启用。
+DEAD_SITES = {
+    "911178": "域名已失效(410)",
+    "zsky_529076": "域名已失效(410)",
+    "zsky_529075": "域名已失效(410)",
+    "zsky_9966109": "站点维护中(503)",
+    "zsky_9966108": "域名已失效(410)",
+    "zsky_911178": "域名已失效(410)",
+    "zsky_911179": "域名已失效(410)",
+    "yhg_1111076": "域名已失效(410)",
+    "yhg_1111075": "域名已失效(410)",
+    "yhg_1111077": "域名已失效(410)",
+    "lingfengyun": "网站已关闭",
+    "3d48": "搜索接口失效(404)",
+    "ttbt": "后端仅提供首页,搜索路径404",
+    # 以下为纯前端渲染或需签名，requests 无法取到数据
+    "btsow": "结果由JS渲染,HTML无数据",
+    "cilisousuo88": "已变为域名停放页,搜索无响应",
+    "taocili": "SSR返回空结果,真实结果由JS拉取",
+    "btsearch_love": "API需客户端签名(Missing sign)",
+}
+
+# 实际参与检索的站点（已剔除失效站点）
+ACTIVE_SITES = [s for s in SITE_LIST if s["id"] not in DEAD_SITES]
+
+
 # ===================== 搜索结果数据类 =====================
 class TorrentItem:
     def __init__(self):
@@ -372,6 +426,8 @@ class TorrentItem:
         self.hash = ""
         self.site = ""
         self.site_id = ""
+        # 部分站点列表页只给短码（如 /magnet/xxx、/seed/xxx），需再抓详情页换真实磁力
+        self.detail_url = ""
 
 
 # ===================== 解析辅助 =====================
@@ -617,7 +673,14 @@ def parse_u001(soup, site):
 
 def parse_nyaa(soup, site):
     out = []
+    # 兩種結構：
+    #  nyaa.si / sukebei: tr.default / tr.success，名称在 td[colspan="2"] a
+    #  nyaa.net: 无 class 的 tr，名称在 td.col-name > a.t-name，size/date/做种
+    #            分别在 td.col-size / td.col-date / td.num-s
     rows = soup.select("tr.default, tr.success")
+    if not rows:
+        rows = [r for r in soup.select("tr")
+                if r.select_one("td.col-name a.t-name")]
     for row in rows:
         magnet_a = row.select_one('a[href^="magnet:"]')
         if not magnet_a:
@@ -627,18 +690,33 @@ def parse_nyaa(soup, site):
         hm = _hash_from_magnet(t.magnet)
         if hm: t.hash = hm
         # 名称在 colspan="2" 的单元格中；首个 td 是分类图标（无文字），需避开
-        name_a = row.select_one('td[colspan="2"] a') or row.select_one('a[title]')
+        name_a = (row.select_one('td[colspan="2"] a')
+                  or row.select_one("td.col-name a.t-name")
+                  or row.select_one('a[title]'))
         if name_a and name_a.get_text(strip=True):
             t.name = name_a.get_text(strip=True)
-        tds = row.find_all("td")
-        # 列序: 分类, 名称(含colspan), 链接, 大小, 日期, 做种, 下载, 完成
-        if len(tds) > 4:
-            size_text = tds[3].get_text(strip=True)
+        size_td = row.select_one("td.col-size")
+        date_td = row.select_one("td.col-date")
+        seed_td = row.select_one("td.num-s")
+        if size_td is None or date_td is None:
+            # nyaa.si 结构按列序解析: 分类, 名称(含colspan), 链接, 大小, 日期, 做种, 下载, 完成
+            tds = row.find_all("td")
+            if len(tds) > 4:
+                size_text = tds[3].get_text(strip=True)
+                if re.match(r"^[\d.]+ ?(GiB|MiB|KiB|GB|MB|KB|B)$", size_text, re.I): t.size = size_text
+                date_text = tds[4].get_text(strip=True)
+                if re.match(r"^\d{4}-\d{2}-\d{2}", date_text): t.date = date_text
+            if len(tds) > 5:
+                seed_text = tds[5].get_text(strip=True)
+                if seed_text.isdigit(): t.hot = seed_text
+        else:
+            # nyaa.net 结构按语义 class 解析
+            size_text = size_td.get_text(strip=True)
             if re.match(r"^[\d.]+ ?(GiB|MiB|KiB|GB|MB|KB|B)$", size_text, re.I): t.size = size_text
-            date_text = tds[4].get_text(strip=True)
+            date_text = date_td.get_text(strip=True)
             if re.match(r"^\d{4}-\d{2}-\d{2}", date_text): t.date = date_text
-        if len(tds) > 5:
-            seed_text = tds[5].get_text(strip=True)
+            seed_text = seed_td.get_text(strip=True) if seed_td else ""
+            seed_text = seed_text.replace(" ", "")
             if seed_text.isdigit(): t.hot = seed_text
         if t.name and t.magnet:
             out.append(t)
@@ -716,6 +794,113 @@ def parse_btmovi(soup, site):
     return out
 
 
+def parse_cilisousuo_cc(soup, site):
+    """磁力搜索CC：li.item 列表，磁力藏在 /magnet/{短码} 详情页。"""
+    out = []
+    for li in soup.find_all(class_="item"):
+        info = li.find(class_="info")
+        if not info:
+            continue
+        title_el = info.find(class_="result-title")
+        link = li.select_one("a.link[href]")
+        if not title_el or not link:
+            continue
+        t = TorrentItem(); t.site = site["name"]
+        t.name = title_el.get_text(strip=True)
+        size_el = li.find(class_="size")
+        if size_el:
+            t.size = size_el.get_text(strip=True)
+        fn_el = info.find(class_="filename")
+        if fn_el:
+            t.files = fn_el.get_text(strip=True)
+        t.detail_url = link.get("href", "")
+        out.append(t)
+    return out
+
+
+def parse_zzb10(soup, site):
+    """种子吧：li.media 列表，磁力藏在 /seed/{短码} 详情页。"""
+    out = []
+    for li in soup.find_all(class_="media"):
+        a = li.select_one("h4.media-heading a[href]") or li.select_one("a[href*='/seed/']")
+        if not a:
+            continue
+        t = TorrentItem(); t.site = site["name"]
+        t.name = a.get("title", "").strip() or a.get_text(strip=True)
+        t.detail_url = a.get("href", "")
+        fn_el = li.find(class_="search-file")
+        if fn_el:
+            t.files = fn_el.get_text(strip=True)
+        info_el = li.find(class_="search-info")
+        if info_el:
+            spans = info_el.select("span.s_b")
+            if len(spans) >= 1:
+                t.date = spans[0].get_text(strip=True)
+            if len(spans) >= 2:
+                t.size = spans[1].get_text(strip=True)
+            if len(spans) >= 3:
+                t.hot = spans[2].get_text(strip=True)
+        out.append(t)
+    return out
+
+
+def parse_ttcl(soup, site):
+    """天堂磁力（后端 tt.ttso.top）：div.search-panel 为一条结果。
+    注意要跳过 href 指向 click2 广告域的条目，只取 /bt/{hash} 的真实结果。"""
+    out = []
+    for panel in soup.select("div.search-panel"):
+        a = panel.select_one("a.list-title[href^='/bt/']")
+        if not a:
+            continue
+        hm = re.search(r"/bt/([a-fA-F0-9]{32,40})", a.get("href", ""))
+        if not hm:
+            continue
+        t = TorrentItem(); t.site = site["name"]
+        t.name = a.get_text(strip=True)
+        t.hash = hm.group(1)
+        t.magnet = f"magnet:?xt=urn:btih:{t.hash}"
+        footer = panel.select_one("div.panel-footer")
+        if footer:
+            spans = footer.select("span.info-item")
+            if len(spans) >= 1:
+                t.size = spans[0].get_text(strip=True)
+            if len(spans) >= 2:
+                t.files = spans[1].get_text(strip=True)
+            if len(spans) >= 3:
+                t.date = spans[2].get_text(strip=True)
+        out.append(t)
+    return out
+
+
+def parse_foxr(soup, site):
+    """磁力狐（后端 cache.foxn.top，layui 模板）：div.search-box 为一条结果，
+    磁力藏在 /doc/{hash} 链接中。"""
+    out = []
+    for box in soup.select("div.search-box"):
+        a = box.select_one("a[href^='/doc/']")
+        if not a:
+            continue
+        hm = re.search(r"/doc/([a-fA-F0-9]{32,40})", a.get("href", ""))
+        if not hm:
+            continue
+        t = TorrentItem(); t.site = site["name"]
+        t.name = (a.get("title", "") or "").strip() or a.get_text(strip=True)
+        t.hash = hm.group(1)
+        t.magnet = f"magnet:?xt=urn:btih:{t.hash}"
+        for p in box.select("div.layui-colla-content p"):
+            txt = p.get_text(" ", strip=True)
+            sp = p.select_one("span")
+            val = sp.get_text(strip=True) if sp else ""
+            if "创建时间" in txt:
+                t.date = val
+            elif "文件大小" in txt:
+                t.size = val
+            elif "文件数量" in txt:
+                t.files = val
+        out.append(t)
+    return out
+
+
 def parse_generic(soup, site):
     """通用尽力解析：优先直接磁力链接，否则尝试从 /hash/ /bt/ /information/ /view.php /detail/ 等链接构造。"""
     out = []
@@ -767,46 +952,156 @@ PARSERS = {
     "torrentkitty": parse_torrentkitty,
     "zsky": parse_zsky,
     "btmovi": parse_btmovi,
+    "cilisousuo_cc": parse_cilisousuo_cc,
+    "zzb10": parse_zzb10,
+    "ttcl": parse_ttcl,
+    "foxr": parse_foxr,
     "generic": parse_generic,
 }
 
 
 def build_search_url(site, kw, page):
-    url = site["search_url"].replace("{kw}", kw).replace("{page}", str(page))
+    """构造搜索 URL。关键词按 RFC3986 做百分号编码，空格转 + 更贴近表单语义，
+    中文/空格/特殊字符不会破坏 URL，也不会被二次编码。"""
+    enc_kw = quote(kw, safe="")
+    url = site["search_url"].replace("{kw}", enc_kw).replace("{page}", str(page))
     return url
 
 
-def _fetch(url, headers, proxies, method="get", data=None, timeout=15):
+def _make_session():
+    """创建带重试策略的 Session。对连接类异常也重试，降低偶发网络抖动导致的整站失败。"""
     session = requests.Session()
-    retry = Retry(total=2, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503, 504], allowed_methods=["GET", "POST"])
-    adapter = HTTPAdapter(max_retries=retry)
+    retry = Retry(total=2, backoff_factor=0.4,
+                  status_forcelist=[429, 500, 502, 503, 504],
+                  allowed_methods=["GET", "POST", "HEAD"],
+                  raise_on_status=False)
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=4, pool_maxsize=8)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
+    return session
+
+
+def _resolve_encoding(resp, site):
+    """智能判定响应编码，避免强制 UTF-8 把 GBK 页面解码成乱码。
+    优先级：HTTP Content-Type charset -> HTML meta charset -> 站点配置 -> utf-8"""
+    enc = (resp.encoding or "").strip()
+    # requests 在响应头未声明 charset 时，对 text/* 会回退 ISO-8859-1，需要纠正
+    if not enc or enc.lower() in ("iso-8859-1", "latin-1", "latin1"):
+        head = resp.content[:4096]
+        m = re.search(rb'charset=["\']?\s*([\w-]+)', head, re.I)
+        if m:
+            try:
+                enc = m.group(1).decode("ascii", "ignore").strip().lower()
+            except Exception:
+                enc = ""
+    # 常见 GBK 系列别名统一到 gb18030（超集，兼容性更好）
+    if enc.lower() in ("gbk", "gb2312", "gb-2312", "gb_2312", "x-gbk", "gb18030"):
+        enc = "gb18030"
+    if not enc:
+        enc = site.get("encoding", "utf-8")
+    return enc
+
+
+def _fetch(session, url, headers, proxies, method="get", data=None, timeout=20):
     if method == "post":
-        resp = session.post(url, headers=headers, proxies=proxies, data=data, timeout=timeout, allow_redirects=True)
-    else:
-        resp = session.get(url, headers=headers, proxies=proxies, timeout=timeout, allow_redirects=True)
-    return resp
+        return session.post(url, headers=headers, proxies=proxies, data=data,
+                            timeout=timeout, allow_redirects=True)
+    return session.get(url, headers=headers, proxies=proxies,
+                       timeout=timeout, allow_redirects=True)
+
+
+def _abs_url(base, href):
+    """把详情页的相对路径补全为绝对 URL。"""
+    if not href:
+        return ""
+    if href.startswith("http://") or href.startswith("https://"):
+        return href
+    base = (base or "").rstrip("/")
+    if href.startswith("/"):
+        return base + href
+    return base + "/" + href
+
+
+def _resolve_details(items, site, headers, proxies, limit=24, workers=6):
+    """并发抓取详情页，把短码兑换成真实磁力链接。
+
+    有些站点（磁力搜索CC、种子吧等）列表页只给出 /magnet/xxx、/seed/xxx 短码，
+    真正的磁力在详情页里。这里用小型线程池限量并发换取，避免几十上百次串行请求被封。
+    """
+    pending = [t for t in items if not t.magnet and getattr(t, "detail_url", "")]
+    if not pending:
+        return [t for t in items if t.magnet]
+    pending = pending[:limit]
+    base = site.get("base_url", "")
+
+    def work(t):
+        url = _abs_url(base, t.detail_url)
+        if not url:
+            return
+        try:
+            sess = _make_session()
+            r = _fetch(sess, url, headers, proxies, timeout=12)
+            if r.status_code != 200:
+                return
+            r.encoding = _resolve_encoding(r, site)
+            m = re.search(r"magnet:\?xt=urn:btih:([A-Za-z0-9]{32,40})", r.text, re.I)
+            if m:
+                t.hash = m.group(1)
+                t.magnet = f"magnet:?xt=urn:btih:{t.hash}"
+        except Exception:
+            pass
+
+    try:
+        with ThreadPoolExecutor(max_workers=min(workers, len(pending))) as ex:
+            list(ex.map(work, pending))
+    except Exception:
+        pass
+    return [t for t in items if t.magnet]
 
 
 def search_site(site, kw, page, proxies=None):
     """抓取并解析单个站点一页，返回 TorrentItem 列表。请求失败或状态码非200时抛出异常。"""
     kw = kw.strip()
+    # nyaa.net 服务端会拒绝中文关键词（返回 503），提前拦截并给出明确提示，避免浪费请求
+    if site.get("id") == "nyaa_net" and re.search(r"[\u4e00-\u9fff]", kw):
+        raise RuntimeError("该站仅支持英文/日文关键词（中文关键词会被服务端拒绝）")
     method = site.get("method", "get")
     data = None
     if method == "post" and "post_data" in site:
         data = {k: v.replace("{kw}", kw) for k, v in site["post_data"].items()}
     url = build_search_url(site, kw, page)
+
     headers = build_headers(site.get("extra_headers"))
-    # 反爬：随机微小延迟
-    time.sleep(random.uniform(0.2, 0.8))
-    resp = _fetch(url, headers, proxies, method=method, data=data, timeout=15)
+    # 未显式指定 Referer 时，补上站点首页，降低被判为盗链/爬虫的概率
+    if "Referer" not in headers:
+        headers["Referer"] = site.get("base_url", url)
+
+    session = _make_session()
+    try:
+        # 反爬：随机微小延迟
+        time.sleep(random.uniform(0.15, 0.6))
+        # 部分站点需要先访问首页拿到 Cookie（如含 CSRF/会话校验的站点）
+        if site.get("need_home_cookie"):
+            try:
+                session.get(site.get("base_url", url), headers=headers,
+                            proxies=proxies, timeout=10, allow_redirects=True)
+            except Exception:
+                pass
+        resp = _fetch(session, url, headers, proxies, method=method, data=data, timeout=20)
+    finally:
+        pass
+
     if resp.status_code != 200:
         raise requests.exceptions.HTTPError(f"HTTP {resp.status_code}")
-    resp.encoding = site.get("encoding", "utf-8")
+    resp.encoding = _resolve_encoding(resp, site)
     soup = BeautifulSoup(resp.text, "lxml")
     parser = PARSERS.get(site.get("parser", site["id"]), parse_generic)
-    return parser(soup, site)
+    items = parser(soup, site)
+    # 列表页只给短码的站点，再并发抓详情页换真实磁力
+    if site.get("resolve_detail"):
+        items = _resolve_details(items, site, headers, proxies,
+                                 limit=site.get("detail_limit", 24))
+    return items
 
 
 # ===================== 后台搜索线程（支持代理智能回退） =====================
@@ -829,7 +1124,10 @@ class SearchThread(QThread):
             results = search_site(self.site, self.kw, self.page, proxies)
             return results
         except Exception as e:
+            detail = str(e)
             msg = f"{'代理' if via_proxy else '直连'}请求失败：{type(e).__name__}"
+            if detail and detail != type(e).__name__:
+                msg += f"（{detail}）"
             raise RuntimeError(msg) from e
 
     def run(self):
@@ -959,7 +1257,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("BT磁力聚合搜索工具 V2.0")
         self.resize(1500, 880)
         self.search_thread = None
-        self.current_site = SITE_LIST[0]
+        self.current_site = ACTIVE_SITES[0]
         self.current_page = 1
         self.clipboard = QApplication.clipboard()
 
@@ -1079,7 +1377,8 @@ class MainWindow(QMainWindow):
         all_item = QListWidgetItem("📊 全部站点")
         all_item.setData(Qt.ItemDataRole.UserRole, "all")
         self.site_list.addItem(all_item)
-        for s in SITE_LIST:
+        # 只列出可用站点；失效站点集中登记在 DEAD_SITES，不再占位
+        for s in ACTIVE_SITES:
             item = QListWidgetItem(s["name"])
             item.setData(Qt.ItemDataRole.UserRole, s["id"])
             self.site_list.addItem(item)
@@ -1350,11 +1649,12 @@ class MainWindow(QMainWindow):
         self.search_btn.setEnabled(False)
         self.search_all_btn.setEnabled(False)
         self.status_label.setText(f"⚡ 正在从全部站点并发搜索：{kw}")
-        self.log(f"⚡ 开始全部站点并发搜索：{kw}（共 {len(SITE_LIST)} 个站点，并发上限 {self.max_concurrent}）")
+        self.log(f"⚡ 开始全部站点并发搜索：{kw}（共 {len(ACTIVE_SITES)} 个可用站点，"
+                 f"已停用 {len(DEAD_SITES)} 个失效站点，并发上限 {self.max_concurrent}）")
         self.site_list.setCurrentRow(0)
         self.current_view = "all"
         self.search_all_keyword = kw
-        self.pending_sites = list(SITE_LIST)
+        self.pending_sites = list(ACTIVE_SITES)
         self.active_threads = 0
         self._pump_all()
 

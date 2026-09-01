@@ -15,10 +15,30 @@ probe_out/
 probe_*.py
 debug_*.py
 check_*.py
+inspect_*.py
+verify_*.py
+test_*.py
+diag_*.py
+diag_*.log
+diag_out/
+*_out/
+api_out/
+backend_out/
+publish_release.py
+headless_*.py
+fix_asset.py
+find_api.py
+dump_spa.py
+final_probe*.py
 download_gcc*.py
 analyze_u001.py
 deep_analyze.py
 diagnose_sites.py
+probe3.py
+*.html
+bts.min.js
+chunk_*.js
+test.c
 nuitka-crash-report.xml
 
 # OS

@@ -4,6 +4,18 @@
 
 ---
 
+## V1.1 更新说明
+
+- **站点可用率大幅提升**：经全站自测（英文关键词），23 个启用站点 **100% 能返回数据**（此前仅约 20%）。
+  - 修复 Brotli 压缩乱码：请求头不再声明 `br` 编码，避免未装 brotli 时收到二进制乱码。
+  - 自动检测响应编码（GBK/UTF-8/EUC-JP 等），修复多站乱码导致解析为 0 条的问题。
+  - 破解 iframe 前端站真实后端（如 cilimao、ttbt 系列），改用后端接口搜索。
+  - 新增 cilisousuo_cc / zzb10 / ttcl / foxr 等解析器；禁用 17 个已失效域名站点。
+- **nyaa.net 解析修复**：兼容其无 class 行结构（`td.col-name a.t-name` / `col-size` / `num-s`），恢复 75 条/页。
+- **nyaa.net 中文关键词提示**：该站服务端拒绝中文关键词（503），工具会提前拦截并提示「仅支持英文/日文关键词」。
+
+---
+
 ## 一、功能特性
 
 | 功能 | 说明 |
@@ -37,7 +49,7 @@
 ## 三、使用方法
 
 ### 1. 直接运行 exe（推荐）
-从 [Releases](https://github.com/huyin324/BT-Aggregate-Search/releases) 下载 `BT-Aggregate-Search-V1.0.exe`（即打包好的 `BT磁力聚合搜索工具.exe`），双击即可运行，无需安装 Python。
+从 [Releases](https://github.com/huyin324/BT-Aggregate-Search/releases) 下载 `BT-Aggregate-Search-V1.1.exe`（即打包好的 `BT磁力聚合搜索工具.exe`），双击即可运行，无需安装 Python。
 
 ### 2. 源码运行
 ```bash
