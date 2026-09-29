@@ -25,7 +25,7 @@ diag_out/
 api_out/
 backend_out/
 publish_release.py
-headless_*.py
+icon_v2.png
 fix_asset.py
 find_api.py
 dump_spa.py

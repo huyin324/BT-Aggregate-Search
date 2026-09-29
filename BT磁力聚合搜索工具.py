@@ -3,7 +3,7 @@
 BT磁力聚合搜索工具 - PyQt6版
 支持多站点聚合搜索，新增：网络代理智能回退、每页条目数与原站一致、
 结果排序（大小/时间/热度）、工具图标、界面/性能/反爬优化。
-版本：V2.1
+版本：V1.2（矢量图标 / 代理预检 / whatslink 磁力预览 / 站点精简）
 仅用于技术学习，请遵守版权法律法规
 """
 
@@ -25,9 +25,11 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, QV
                              QStatusBar, QComboBox, QSpinBox, QMessageBox, QMenuBar,
                              QMenu, QDialog, QCheckBox, QDialogButtonBox, QFormLayout,
                              QPlainTextEdit, QSplitter, QStyledItemDelegate,
-                             QStyle, QStyleOptionViewItem)
+                             QStyle, QStyleOptionViewItem, QStyleOptionButton,
+                             QScrollArea, QSizePolicy)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSettings, QRect
-from PyQt6.QtGui import QFont, QDesktopServices, QIcon, QAction, QPalette, QColor
+from PyQt6.QtGui import (QFont, QDesktopServices, QIcon, QAction, QPalette, QColor,
+                         QImage, QPainter, QPixmap)
 from PyQt6.QtCore import QUrl
 
 # 屏蔽无关警告
@@ -45,6 +47,31 @@ if getattr(sys, "frozen", False):
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ICON_PATH = os.path.join(BASE_DIR, "icon.ico")
+SVG_ICON_PATH = os.path.join(BASE_DIR, "磁力.svg")
+
+
+def load_app_icon():
+    """加载应用图标：优先渲染矢量 SVG（磁力.svg）为多尺寸位图，失败回退 icon.ico。"""
+    if os.path.exists(SVG_ICON_PATH):
+        try:
+            from PyQt6.QtSvg import QSvgRenderer
+            renderer = QSvgRenderer(SVG_ICON_PATH)
+            if renderer.isValid():
+                icon = QIcon()
+                for size in (16, 24, 32, 48, 64, 128, 256):
+                    img = QImage(size, size, QImage.Format.Format_ARGB32)
+                    img.fill(Qt.GlobalColor.transparent)
+                    painter = QPainter(img)
+                    renderer.render(painter)
+                    painter.end()
+                    icon.addPixmap(QPixmap.fromImage(img))
+                if not icon.isNull():
+                    return icon
+        except Exception:
+            pass
+    if os.path.exists(ICON_PATH):
+        return QIcon(ICON_PATH)
+    return QIcon()
 
 # ===================== 代理配置（全局） =====================
 PROXY_CONFIG = {"enabled": False, "protocol": "http", "host": "127.0.0.1", "port": 7897}
@@ -79,6 +106,70 @@ def get_proxies():
         url = f"socks5://{h}:{port}"
         return {"http": url, "https": url}
     return None
+
+
+# ===================== 代理预检（启用代理时先验证可用性，结果缓存） =====================
+import threading
+
+_PROXY_CHECK = {"ok": None, "msg": "", "ts": 0.0, "lock": threading.Lock()}
+_PROXY_CHECK_TTL = 300  # 缓存 5 分钟，避免每个搜索线程都重复探测
+
+
+def reset_proxy_cache():
+    """代理设置变更后清空预检缓存，下次检索时重新探测。"""
+    with _PROXY_CHECK["lock"]:
+        _PROXY_CHECK["ok"] = None
+        _PROXY_CHECK["msg"] = ""
+        _PROXY_CHECK["ts"] = 0.0
+
+
+def check_proxy_available(max_seconds=12):
+    """
+    代理预检：TCP 连通 + 经代理的外网 HTTP 请求，双重验证。
+    返回 (ok, msg)。结果缓存 _PROXY_CHECK_TTL 秒；未启用代理直接返回 (False, "")。
+    """
+    if not PROXY_CONFIG["enabled"]:
+        return False, "代理未启用"
+    now = time.time()
+    with _PROXY_CHECK["lock"]:
+        if _PROXY_CHECK["ok"] is not None and now - _PROXY_CHECK["ts"] < _PROXY_CHECK_TTL:
+            return _PROXY_CHECK["ok"], _PROXY_CHECK["msg"]
+        proxies = get_proxies()
+        ok, msg = _probe_proxy(proxies, max_seconds)
+        _PROXY_CHECK["ok"] = ok
+        _PROXY_CHECK["msg"] = msg
+        _PROXY_CHECK["ts"] = now
+        return ok, msg
+
+
+def _probe_proxy(proxies, max_seconds=12):
+    """实际探测逻辑：先 TCP 连通性，再经代理外网请求（204 探测端点最快）。"""
+    import socket
+    host = PROXY_CONFIG["host"]
+    port = int(PROXY_CONFIG["port"])
+    # 1) TCP 连通性（socks5/http 通用）
+    try:
+        with socket.create_connection((host, port), timeout=4):
+            pass
+    except Exception as e:
+        return False, f"TCP 无法连通 {host}:{port}（{type(e).__name__}）"
+    # 2) 经代理外网请求：优先 204 探测端点，失败再用普通站点兜底
+    test_urls = [
+        ("http://www.gstatic.com/generate_204", 204),
+        ("https://www.google.com/generate_204", 204),
+        ("https://www.baidu.com", 200),
+    ]
+    last_err = ""
+    for url, expect in test_urls:
+        try:
+            r = requests.get(url, proxies=proxies, timeout=max(4, max_seconds // 2),
+                             allow_redirects=True)
+            if r.status_code == expect:
+                return True, f"外网请求正常（{url} → {r.status_code}）"
+            last_err = f"{url} 返回 {r.status_code}"
+        except Exception as e:
+            last_err = f"{url} {type(e).__name__}: {str(e)[:60]}"
+    return False, f"外网请求失败（{last_err}）"
 
 
 # ===================== 反爬：随机UA与请求头 =====================
@@ -172,26 +263,9 @@ SITE_LIST = [
         "detail_url": "https://u9a9.com/view?id={hash}",
         "encoding": "utf-8", "status": "normal", "parser": "u9a9", "page_size": 50,
     },
-    {
-        "id": "u001", "name": "U001 (u001.25img.com)", "base_url": "https://u001.25img.com",
-        "search_url": "https://u001.25img.com/?type=2&search={kw}&p={page}",
-        "detail_url": "https://u001.25img.com/view?id={hash}",
-        "encoding": "utf-8", "status": "normal", "parser": "u001", "page_size": 50,
-    },
-
+    # V1.2 实测剔除：u001 为假搜索（任意关键词返回同一固定列表）
     # ---------- 新增站点：Nyaa 模板 ----------
-    {
-        "id": "nyaa_si", "name": "Nyaa (nyaa.si)", "base_url": "https://nyaa.si",
-        "search_url": "https://nyaa.si/?f=0&c=0_0&q={kw}&p={page}",
-        "detail_url": "https://nyaa.si/view/{id}",
-        "encoding": "utf-8", "status": "normal", "parser": "nyaa", "page_size": 75,
-    },
-    {
-        "id": "nyaa_net", "name": "Nyaa.net", "base_url": "https://nyaa.net",
-        "search_url": "https://nyaa.net/?f=0&c=0_0&q={kw}&p={page}",
-        "detail_url": "https://nyaa.net/view/{id}",
-        "encoding": "utf-8", "status": "normal", "parser": "nyaa", "page_size": 75,
-    },
+    # V1.2 实测剔除：nyaa_si / nyaa_net 中文关键词（白洁/少妇）无法检索到相关内容
     {
         "id": "sukebei", "name": "Sukebei (sukebei.nyaa.si)", "base_url": "https://sukebei.nyaa.si",
         "search_url": "https://sukebei.nyaa.si/?f=0&c=0_0&q={kw}&p={page}",
@@ -296,11 +370,7 @@ SITE_LIST = [
         "encoding": "utf-8", "status": "normal", "parser": "ciligou", "page_size": 15,
         "extra_headers": {"Referer": "https://cilimao.de/"},
     },
-    {
-        "id": "btlms", "name": "北辰阁 (tr.btlms.top)", "base_url": "https://tr.btlms.top",
-        "search_url": "https://tr.btlms.top/search?q={kw}",
-        "detail_url": "", "encoding": "utf-8", "status": "normal", "parser": "generic", "page_size": 0,
-    },
+    # V1.2 实测剔除：btlms 对任意关键词仅返回默认热榜（如"元气早餐"），无搜索能力
     {
         "id": "zzb10", "name": "种子吧 (zzb10.vip)", "base_url": "https://zzb10.vip",
         "search_url": "https://zzb10.vip/", "method": "post", "post_data": {"wd": "{kw}"},
@@ -667,10 +737,6 @@ def parse_u9a9(soup, site):
     return out
 
 
-def parse_u001(soup, site):
-    return parse_u9a9(soup, site)
-
-
 def parse_nyaa(soup, site):
     out = []
     # 兩種結構：
@@ -947,7 +1013,6 @@ PARSERS = {
     "sokitty": parse_sokitty,
     "btapp": parse_btapp,
     "u9a9": parse_u9a9,
-    "u001": parse_u001,
     "nyaa": parse_nyaa,
     "torrentkitty": parse_torrentkitty,
     "zsky": parse_zsky,
@@ -1062,9 +1127,6 @@ def _resolve_details(items, site, headers, proxies, limit=24, workers=6):
 def search_site(site, kw, page, proxies=None):
     """抓取并解析单个站点一页，返回 TorrentItem 列表。请求失败或状态码非200时抛出异常。"""
     kw = kw.strip()
-    # nyaa.net 服务端会拒绝中文关键词（返回 503），提前拦截并给出明确提示，避免浪费请求
-    if site.get("id") == "nyaa_net" and re.search(r"[\u4e00-\u9fff]", kw):
-        raise RuntimeError("该站仅支持英文/日文关键词（中文关键词会被服务端拒绝）")
     method = site.get("method", "get")
     data = None
     if method == "post" and "post_data" in site:
@@ -1132,7 +1194,13 @@ class SearchThread(QThread):
 
     def run(self):
         try:
+            # 代理预检：启用代理时先探测可用性（结果缓存 5 分钟），不可用则本次仅直连
             use_proxy = PROXY_CONFIG["enabled"]
+            if use_proxy:
+                proxy_ok, proxy_msg = check_proxy_available()
+                if not proxy_ok:
+                    self.log_signal.emit(f"⚠ 代理预检未通过，本次检索仅直连（{proxy_msg}）")
+                    use_proxy = False
             results = []
             self.log_signal.emit(f"▶ 开始检索「{self.site['name']}」（直连）")
             try:
@@ -1252,9 +1320,8 @@ class CountHighlightDelegate(QStyledItemDelegate):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        if os.path.exists(ICON_PATH):
-            self.setWindowIcon(QIcon(ICON_PATH))
-        self.setWindowTitle("BT磁力聚合搜索工具 V2.0")
+        self.setWindowIcon(load_app_icon())
+        self.setWindowTitle("BT磁力聚合搜索工具 V1.2")
         self.resize(1500, 880)
         self.search_thread = None
         self.current_site = ACTIVE_SITES[0]
@@ -1276,6 +1343,9 @@ class MainWindow(QMainWindow):
         self.search_all_keyword = ""
         # 持有所有 SearchThread 引用，避免线程仍在运行时被 GC 导致闪退
         self.threads = []
+        # 磁力预览状态（同一时刻仅允许一个 whatslink 请求线程；弹窗引用防 GC）
+        self._preview_thread = None
+        self._preview_windows = []
 
         self._init_ui()
         self._init_menu()
@@ -1309,13 +1379,16 @@ class MainWindow(QMainWindow):
         dlg = ProxyDialog(self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             save_proxy_config()
+            reset_proxy_cache()  # 设置变更后重新预检
             self._update_proxy_status_label()
+            self.log("代理设置已保存，代理预检缓存已重置")
 
     def show_about(self):
         QMessageBox.information(self, "关于",
-            "BT磁力聚合搜索工具 V2.0\n\n"
+            "BT磁力聚合搜索工具 V1.2\n\n"
             "多站点磁力聚合检索。\n"
-            "新增：代理智能回退、每页条目数与原站一致、结果排序、工具图标、界面/性能/反爬优化。\n\n"
+            "V1.2：矢量图标、代理预检（不可用自动仅直连）、"
+            "whatslink 磁力预览、站点精简与检索优化。\n\n"
             "仅用于技术学习，请遵守版权法律法规。")
 
     # ---------- UI ----------
@@ -1404,11 +1477,11 @@ class MainWindow(QMainWindow):
         left_widget.setLayout(left_layout)
 
         right_layout = QVBoxLayout()
-        result_label = QLabel("📋 搜索结果（单击复制，双击磁力链接打开）")
+        result_label = QLabel("📋 搜索结果（单击复制 / 点「预览」看磁力截图，双击磁力链接打开）")
         result_label.setStyleSheet("font-weight: bold; font-size: 14px;")
         right_layout.addWidget(result_label)
         self.result_table = QTableWidget()
-        self.table_headers = ["文件名", "磁力链接", "文件大小", "收录时间", "热度", "来源站点"]
+        self.table_headers = ["文件名", "磁力链接", "文件大小", "收录时间", "热度", "来源站点", "磁力预览"]
         self.result_table.setColumnCount(len(self.table_headers))
         self.result_table.setHorizontalHeaderLabels(self.table_headers)
         header = self.result_table.horizontalHeader()
@@ -1418,10 +1491,14 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
         self.result_table.setColumnWidth(2, 100)
         self.result_table.setColumnWidth(3, 110)
         self.result_table.setColumnWidth(4, 80)
         self.result_table.setColumnWidth(5, 150)
+        self.result_table.setColumnWidth(6, 92)
+        self._preview_delegate = MagnetPreviewDelegate()
+        self.result_table.setItemDelegateForColumn(6, self._preview_delegate)
         self.result_table.cellClicked.connect(self.copy_cell_text)
         self.result_table.cellDoubleClicked.connect(self.open_magnet)
         self.result_table.verticalHeader().setDefaultSectionSize(35)
@@ -1558,8 +1635,16 @@ class MainWindow(QMainWindow):
             if col == 1:
                 item.setForeground(Qt.GlobalColor.blue)
             self.result_table.setItem(row, col, item)
+        # 第 7 列「磁力预览」：仅放置占位项，按钮由 MagnetPreviewDelegate 绘制
+        preview_item = QTableWidgetItem("")
+        preview_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        preview_item.setData(Qt.ItemDataRole.UserRole, torrent.magnet)
+        self.result_table.setItem(row, 6, preview_item)
 
     def copy_cell_text(self, row, col):
+        if col == 6:
+            self._start_magnet_preview(row)
+            return
         item = self.result_table.item(row, col)
         if not item:
             return
@@ -1576,6 +1661,54 @@ class MainWindow(QMainWindow):
             if item and item.text().startswith("magnet:"):
                 QDesktopServices.openUrl(QUrl(item.text()))
                 self.status_label.setText("🚀 已调用下载工具打开磁力链接")
+
+    # ---------- 磁力预览（whatslink.info） ----------
+    def _start_magnet_preview(self, row):
+        item = self.result_table.item(row, 1)
+        magnet = item.text() if item else ""
+        if not magnet.startswith("magnet:"):
+            self.status_label.setText("⚠️ 该行没有磁力链接，无法预览")
+            return
+        if self._preview_thread is not None:
+            self.status_label.setText("⏳ 正在获取上一个磁力预览，请稍候...")
+            return
+        # 代理决策：启用代理且预检可用 → 走代理；否则直连
+        use_proxy = False
+        if PROXY_CONFIG["enabled"]:
+            proxy_ok, _ = check_proxy_available()
+            use_proxy = proxy_ok
+        self.status_label.setText("🔍 正在从 whatslink.info 获取磁力预览...")
+        self.log(f"🔍 磁力预览：{magnet[:70]}...（代理：{'开' if use_proxy else '关'}）")
+        t = WhatslinkPreviewThread(magnet, use_proxy)
+        self._preview_thread = t
+        t.log_signal.connect(self.log, Qt.ConnectionType.QueuedConnection)
+        t.done_signal.connect(self._on_preview_done, Qt.ConnectionType.QueuedConnection)
+        t.error_signal.connect(self._on_preview_error, Qt.ConnectionType.QueuedConnection)
+        t.finished.connect(self._cleanup_preview_thread, Qt.ConnectionType.QueuedConnection)
+        t.start()
+
+    def _cleanup_preview_thread(self):
+        if self._preview_thread is not None:
+            self._preview_thread.deleteLater()
+            self._preview_thread = None
+        self.status_label.setText("就绪")
+
+    def _on_preview_done(self, name, image_bytes_list, info_text):
+        magnet = ""
+        if self._preview_thread is not None:
+            magnet = self._preview_thread.magnet
+        dlg = MagnetPreviewDialog(self, magnet, name, image_bytes_list, info_text)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._preview_windows.append(dlg)
+        # 弹窗关闭后由 WA_DeleteOnClose 释放 C++ 对象；这里仅限制引用列表长度防累积
+        if len(self._preview_windows) > 20:
+            self._preview_windows = self._preview_windows[-20:]
+        dlg.show()
+        self.log(f"✅ 磁力预览就绪：{name[:50]}（{len(image_bytes_list)} 张截图）")
+
+    def _on_preview_error(self, msg):
+        self.status_label.setText(f"❌ {msg}")
+        self.log(f"❌ {msg}")
 
     # ---------- 排序切换 ----------
     def on_sort_changed(self):
@@ -1766,6 +1899,180 @@ class MainWindow(QMainWindow):
         self.start_search()
 
 
+# ===================== whatslink.info 磁力预览 =====================
+WHATSLINK_API = "https://whatslink.info/api/v1/link"
+WHATSLINK_PAGE = "https://whatslink.info/?url={url}"
+
+
+def bytes_to_human(n):
+    n = float(n or 0)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{int(n)} {unit}" if unit == "B" else f"{n:.2f} {unit}"
+        n /= 1024
+    return f"{n:.2f} TB"
+
+
+def fetch_whatslink(magnet, proxies=None, timeout=15):
+    """调用 whatslink.info 解析接口，返回 JSON dict。"""
+    headers = {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://whatslink.info/",
+    }
+    r = requests.get(WHATSLINK_API, params={"url": magnet}, headers=headers,
+                     proxies=proxies, timeout=timeout)
+    r.raise_for_status()
+    return r.json()
+
+
+class WhatslinkPreviewThread(QThread):
+    """后台线程：调用 whatslink 接口 →（必要时轮询等待解析）→ 下载截图字节。"""
+    log_signal = pyqtSignal(str)
+    done_signal = pyqtSignal(str, list, str)   # (名称, [图片字节...], 信息文本)
+    error_signal = pyqtSignal(str)
+
+    MAX_WAIT_ROUNDS = 5      # 新磁力解析轮询次数
+    WAIT_SECONDS = 8         # 每轮间隔
+    MAX_IMAGES = 12          # 最多下载的截图张数
+
+    def __init__(self, magnet, use_proxy=False, parent=None):
+        super().__init__(parent)
+        self.magnet = magnet
+        self.use_proxy = use_proxy
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+
+    def _sleep_interruptible(self, seconds):
+        for _ in range(int(seconds * 10)):
+            if self._stop:
+                return False
+            time.sleep(0.1)
+        return not self._stop
+
+    def run(self):
+        try:
+            proxies = get_proxies() if self.use_proxy else None
+            data = None
+            shots = []
+            # 1) 调接口；新磁力可能需要等待服务端解析，轮询若干轮
+            for attempt in range(1, self.MAX_WAIT_ROUNDS + 1):
+                if self._stop:
+                    return
+                try:
+                    data = fetch_whatslink(self.magnet, proxies)
+                except Exception as e:
+                    self.error_signal.emit(
+                        f"whatslink 接口请求失败：{type(e).__name__} {str(e)[:80]}")
+                    return
+                shots = [s.get("screenshot")
+                         for s in (data.get("screenshots") or []) if s.get("screenshot")]
+                if shots:
+                    break
+                if attempt < self.MAX_WAIT_ROUNDS:
+                    self.log_signal.emit(
+                        f"⏳ whatslink 正在解析该磁力（等待 {self.WAIT_SECONDS}s 后重试，"
+                        f"{attempt}/{self.MAX_WAIT_ROUNDS - 1}）...")
+                    if not self._sleep_interruptible(self.WAIT_SECONDS):
+                        return
+            name = data.get("name") or "（未命名）"
+            info_parts = [name, bytes_to_human(data.get("size"))]
+            ftype = data.get("file_type") or data.get("type") or ""
+            if ftype:
+                info_parts.append(str(ftype))
+            info_text = "  |  ".join(p for p in info_parts if p)
+            if not shots:
+                self.done_signal.emit(name, [], "whatslink 暂无该磁力的截图（可能解析超时或资源未被索引）")
+                return
+            # 2) 下载截图（jpg 字节，QPixmap 必须在 GUI 线程构造）
+            imgs = []
+            total = min(len(shots), self.MAX_IMAGES)
+            for i, u in enumerate(shots[:total]):
+                if self._stop:
+                    return
+                try:
+                    rr = requests.get(u, headers={
+                        "User-Agent": random.choice(USER_AGENTS),
+                        "Referer": "https://whatslink.info/",
+                    }, proxies=proxies, timeout=20)
+                    if rr.status_code == 200 and rr.content:
+                        imgs.append(rr.content)
+                except Exception:
+                    pass
+                self.log_signal.emit(f"⬇ 截图下载 {i + 1}/{total}")
+            if not imgs:
+                self.error_signal.emit("截图下载全部失败（网络异常）")
+                return
+            self.done_signal.emit(name, imgs, info_text)
+        except Exception as e:
+            self.error_signal.emit(f"预览线程异常：{type(e).__name__} {str(e)[:100]}")
+
+
+class MagnetPreviewDialog(QDialog):
+    """磁力预览弹窗：展示 whatslink 返回的截图（可滚动）。"""
+    def __init__(self, parent, magnet, name, image_bytes_list, info_text):
+        super().__init__(parent)
+        import hashlib as _hashlib
+        self.setWindowTitle(f"磁力预览 - {name[:40]}")
+        self.resize(760, 600)
+        layout = QVBoxLayout(self)
+        info_label = QLabel(info_text)
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet("font-weight: bold; font-size: 13px; padding: 2px;")
+        layout.addWidget(info_label)
+        if image_bytes_list:
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            inner = QWidget()
+            v = QVBoxLayout(inner)
+            v.setSpacing(8)
+            for i, data in enumerate(image_bytes_list, 1):
+                pix = QPixmap()
+                if pix.loadFromData(data):
+                    lbl = QLabel()
+                    lbl.setPixmap(pix.scaledToWidth(700, Qt.TransformationMode.SmoothTransformation))
+                    lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    lbl.setStyleSheet("border: 1px solid #ddd; border-radius: 4px;")
+                    v.addWidget(lbl)
+                else:
+                    v.addWidget(QLabel(f"第 {i} 张截图解码失败"))
+            v.addStretch(1)
+            scroll.setWidget(inner)
+            layout.addWidget(scroll, 1)
+            layout.addWidget(QLabel(f"共 {len(image_bytes_list)} 张截图 · 数据来源：whatslink.info"))
+        else:
+            layout.addWidget(QLabel(info_text))
+        btn_row = QHBoxLayout()
+        page_url = WHATSLINK_PAGE.format(url=QUrl.toPercentEncoding(magnet).data().decode())
+        open_btn = QPushButton("🌐 在浏览器打开 whatslink")
+        open_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(page_url)))
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(open_btn)
+        btn_row.addStretch(1)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+
+class MagnetPreviewDelegate(QStyledItemDelegate):
+    """在「磁力预览」列绘制按钮样式；点击行为由 MainWindow.cellClicked 触发。"""
+    def paint(self, painter, option, index):
+        widget = option.widget
+        btn = QStyleOptionButton()
+        btn.rect = option.rect.adjusted(8, 4, -8, -4)
+        btn.text = "🔍 预览"
+        state = QStyle.StateFlag.State_Enabled | QStyle.StateFlag.State_Raised
+        if option.state & QStyle.StateFlag.State_MouseOver:
+            state |= QStyle.StateFlag.State_MouseOver
+        btn.state = state
+        if widget is not None:
+            widget.style().drawControl(QStyle.ControlElement.CE_PushButton, btn, painter, widget)
+        else:
+            QApplication.style().drawControl(QStyle.ControlElement.CE_PushButton, btn, painter)
+
+
 # ===================== 代理可用性测试线程 =====================
 class ProxyTestThread(QThread):
     result_signal = pyqtSignal(bool, str)
@@ -1823,7 +2130,8 @@ class ProxyDialog(QDialog):
         self.port_spin.setRange(1, 65535)
         self.port_spin.setValue(PROXY_CONFIG["port"])
         layout.addRow("端口：", self.port_spin)
-        hint = QLabel("启用后：先直连检索，失败再用代理重试；两次均失败则跳过该站点。")
+        hint = QLabel("启用后：检索前先预检代理可用性（结果缓存5分钟）；"
+                      "预检通过时先直连、失败再用代理重试；预检不通过则本次仅直连。")
         hint.setWordWrap(True)
         layout.addRow(hint)
 

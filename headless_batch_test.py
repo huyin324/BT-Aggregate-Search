@@ -36,7 +36,7 @@ win = m.MainWindow()
 # 设置搜索关键词，否则 start_all_search 会因空关键词提前返回
 win.search_edit.setText("test")
 
-print("开始批量搜索自检（模拟 40 站点，每站 3 条）...")
+print(f"开始批量搜索自检（模拟 {len(m.ACTIVE_SITES)} 个启用站点，每站 3 条）...")
 win.start_all_search()
 
 deadline = time.time() + 30
@@ -46,12 +46,12 @@ while (win.active_threads > 0 or len(win.threads) > 0) and time.time() < deadlin
 
 print(f"完成后 active_threads={win.active_threads} 活动线程数={len(win.threads)}")
 total = win.result_table.rowCount()
-print(f"表格结果行数={total}（预期={len(m.SITE_LIST)*3}）")
+print(f"表格结果行数={total}（预期={len(m.ACTIVE_SITES)*3}）")
 print(f"日志行数={win.log_text.document().blockCount()}")
 
 # 验证线程已全部清理（核心修复点）
 assert len(win.threads) == 0, f"线程未清理干净：{len(win.threads)}"
-assert total == len(m.SITE_LIST) * 3, f"结果数量不符：{total}"
+assert total == len(m.ACTIVE_SITES) * 3, f"结果数量不符：{total}"
 print("✅ 批量搜索自检通过：无闪退、线程已回收、结果正确汇总。")
 
 # 测试代理对话框构造 + 测试线程类可实例化
