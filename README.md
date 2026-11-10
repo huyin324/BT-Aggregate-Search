@@ -75,7 +75,9 @@ Windows和MacOS已打包可执行文件（见 [Releases](https://github.com/huyi
 - 想从源码启动：安装 Python 3.10+ 后按下方通用步骤执行。
 
 ### 2. macOS
+方式一：从 [Releases](https://github.com/huyin324/BT-Aggregate-Search/releases) 下载“BT-Aggregate-Search-V1.2-macOS-arm64.dmg”双击安装运行。
 
+方式二：
 ```bash
 # 1) 安装 Python 3.10+（官方安装包或 Homebrew）
 brew install python
